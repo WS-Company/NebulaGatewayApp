@@ -1,19 +1,23 @@
-# Build output
-build/
-
-# macOS
-.DS_Store
-
 # Xcode
 *.xcodeproj/
 xcuserdata/
 *.xcworkspace/
 DerivedData/
+build/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.moved-aside
 
 # Swift Package Manager
 .build/
 .swiftpm/
 Package.resolved
 
-# Nebula binary (bundled)
+# macOS
+.DS_Store
+*.dSYM
+
+# Nebula binary (bundled, not committed)
 NebulaGateway/Resources/nebula

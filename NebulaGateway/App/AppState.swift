@@ -171,6 +171,10 @@ final class AppState {
                 if state.nebulaIP == nil {
                     state.nebulaIP = nebulaService.extractIP(for: conn)
                 }
+                // Detect interface by Nebula IP if not yet known
+                if state.interfaceName == nil, let ip = state.nebulaIP {
+                    state.interfaceName = detectInterface(forIP: ip)
+                }
                 connectionStates[conn.id] = state
             } else {
                 // Not running
@@ -198,5 +202,30 @@ final class AppState {
                 connectionStates[id]?.bytesOut = totalOut
             }
         }
+    }
+
+    /// Find which utun interface carries a given Nebula IP by scanning ifaddrs.
+    private func detectInterface(forIP nebulaIP: String) -> String? {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else { return nil }
+        defer { freeifaddrs(ifaddr) }
+
+        var cursor: UnsafeMutablePointer<ifaddrs>? = firstAddr
+        while let addr = cursor {
+            defer { cursor = addr.pointee.ifa_next }
+            let name = String(cString: addr.pointee.ifa_name)
+            guard name.hasPrefix("utun") || name.hasPrefix("nebula") else { continue }
+            guard let sockaddr = addr.pointee.ifa_addr, sockaddr.pointee.sa_family == UInt8(AF_INET) else { continue }
+
+            let ipAddr = sockaddr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { ptr in
+                String(cString: inet_ntoa(ptr.pointee.sin_addr))
+            }
+
+            if ipAddr == nebulaIP {
+                log.info("Detected interface \(name) for Nebula IP \(nebulaIP)")
+                return name
+            }
+        }
+        return nil
     }
 }

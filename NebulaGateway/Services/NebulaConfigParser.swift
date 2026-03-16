@@ -118,8 +118,22 @@ struct NebulaConfigParser {
         }
 
         guard let data = try? pipe.fileHandleForReading.readDataToEndOfFile(),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let details = json["details"] as? [String: Any],
+              let parsed = try? JSONSerialization.jsonObject(with: data)
+        else {
+            return nil
+        }
+
+        // nebula-cert print -json returns either an array [{...}] or an object {...}
+        let json: [String: Any]
+        if let array = parsed as? [[String: Any]], let first = array.first {
+            json = first
+        } else if let obj = parsed as? [String: Any] {
+            json = obj
+        } else {
+            return nil
+        }
+
+        guard let details = json["details"] as? [String: Any],
               let networks = details["networks"] as? [String],
               let firstNetwork = networks.first
         else {

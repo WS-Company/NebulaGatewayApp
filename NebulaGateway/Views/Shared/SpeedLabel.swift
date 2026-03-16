@@ -16,5 +16,6 @@ struct SpeedLabel: View {
         .font(.caption)
         .foregroundStyle(.secondary)
         .monospacedDigit()
+        .fixedSize()
     }
 }
