@@ -1,0 +1,19 @@
+# Build output
+build/
+
+# macOS
+.DS_Store
+
+# Xcode
+*.xcodeproj/
+xcuserdata/
+*.xcworkspace/
+DerivedData/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Nebula binary (bundled)
+NebulaGateway/Resources/nebula

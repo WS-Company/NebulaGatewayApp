@@ -1,0 +1,58 @@
+name: NebulaGateway
+
+options:
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "26.3"
+  groupSortPosition: top
+
+settings:
+  SWIFT_VERSION: "6.0"
+  MACOSX_DEPLOYMENT_TARGET: "14.0"
+  DEVELOPMENT_TEAM: 6GMHLD8SMN
+  CODE_SIGN_STYLE: Manual
+  CODE_SIGN_IDENTITY: "Apple Development"
+
+targets:
+  NebulaGateway:
+    type: application
+    platform: macOS
+    sources:
+      - path: NebulaGateway
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.nebulagateway.app
+      INFOPLIST_FILE: NebulaGateway/Info.plist
+      CODE_SIGN_ENTITLEMENTS: NebulaGateway/NebulaGateway.entitlements
+      PRODUCT_NAME: Nebula Gateway
+      GENERATE_INFOPLIST_FILE: false
+      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      LS_UI_ELEMENT: true
+      ENABLE_HARDENED_RUNTIME: true
+    dependencies:
+      - target: NebulaGatewayHelper
+    postBuildScripts:
+      - name: "Embed Helper binary and LaunchDaemon plist"
+        script: |
+          APP="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app"
+          # Copy LaunchDaemon plist
+          mkdir -p "${APP}/Contents/Library/LaunchDaemons"
+          cp "${SRCROOT}/NebulaGatewayHelper/launchd.plist" "${APP}/Contents/Library/LaunchDaemons/com.nebulagateway.helper.plist"
+          # Copy helper binary into app bundle
+          cp "${BUILT_PRODUCTS_DIR}/com.nebulagateway.helper" "${APP}/Contents/MacOS/com.nebulagateway.helper"
+          # Re-sign helper inside the bundle
+          codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --entitlements "${SRCROOT}/NebulaGatewayHelper/NebulaGatewayHelper.entitlements" "${APP}/Contents/MacOS/com.nebulagateway.helper"
+          # Re-sign the entire app bundle (seal was broken by adding files)
+          codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --entitlements "${SRCROOT}/NebulaGateway/NebulaGateway.entitlements" "${APP}"
+
+  NebulaGatewayHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - path: NebulaGatewayHelper
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.nebulagateway.helper
+      INFOPLIST_FILE: NebulaGatewayHelper/Info.plist
+      CODE_SIGN_ENTITLEMENTS: NebulaGatewayHelper/NebulaGatewayHelper.entitlements
+      PRODUCT_NAME: com.nebulagateway.helper
+      SKIP_INSTALL: true
+      ENABLE_HARDENED_RUNTIME: true
