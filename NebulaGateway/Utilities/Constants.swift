@@ -68,8 +68,6 @@ enum Constants {
     // MARK: - Logging
 
     enum Logging {
-        static let maxFileSize: UInt64 = 10 * 1024 * 1024  // 10 MB
-        static let maxFileCount = 3
         static let appLogName = "app.log"
     }
 }

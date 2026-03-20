@@ -11,6 +11,7 @@ final class HelperManager {
     private(set) var status: HelperStatus = .checking
 
     private var xpcConnection: NSXPCConnection?
+    private var xpcConnectionValid = false
     private let log = AppLogger.shared
 
     // MARK: - Helper Installation
@@ -94,19 +95,36 @@ final class HelperManager {
     /// Get a proxy to the helper for executing commands.
     /// Returns nil if connection fails.
     func getHelperProxy() -> HelperProtocol? {
-        let connection: NSXPCConnection
-        if let existing = xpcConnection {
-            connection = existing
-        } else {
-            let newConn = NSXPCConnection(machServiceName: Constants.helperBundleId, options: .privileged)
-            newConn.remoteObjectInterface = NSXPCInterface(with: HelperProtocol.self)
-            newConn.resume()
-            xpcConnection = newConn
-            connection = newConn
+        if let existing = xpcConnection, xpcConnectionValid {
+            return existing.remoteObjectProxyWithErrorHandler { [weak self] error in
+                AppLogger.shared.error("XPC proxy error: \(error.localizedDescription)")
+                self?.xpcConnectionValid = false
+            } as? HelperProtocol
         }
 
-        return connection.remoteObjectProxyWithErrorHandler { error in
+        // Create new connection (or reconnect after invalidation)
+        xpcConnection?.invalidate()
+
+        let conn = NSXPCConnection(machServiceName: Constants.helperBundleId, options: .privileged)
+        conn.remoteObjectInterface = NSXPCInterface(with: HelperProtocol.self)
+        conn.interruptionHandler = { [weak self] in
+            AppLogger.shared.warning("XPC connection interrupted — will reconnect")
+            self?.xpcConnectionValid = false
+        }
+        conn.invalidationHandler = { [weak self] in
+            AppLogger.shared.warning("XPC connection invalidated — will reconnect")
+            self?.xpcConnectionValid = false
+            self?.xpcConnection = nil
+        }
+        conn.resume()
+
+        xpcConnection = conn
+        xpcConnectionValid = true
+        log.info("XPC connection established to helper")
+
+        return conn.remoteObjectProxyWithErrorHandler { [weak self] error in
             AppLogger.shared.error("XPC proxy error: \(error.localizedDescription)")
+            self?.xpcConnectionValid = false
         } as? HelperProtocol
     }
 

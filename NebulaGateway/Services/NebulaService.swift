@@ -24,12 +24,9 @@ final class NebulaService {
 
     // MARK: - Polling
 
-    /// Start periodic polling of helper for running process status.
     func startPolling(stateUpdate: @escaping ([String: ConnectionState]) -> Void) {
         stopPolling()
-        // Poll immediately
         pollRunningProcesses(stateUpdate: stateUpdate)
-        // Then every 3 seconds
         pollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.pollRunningProcesses(stateUpdate: stateUpdate)
@@ -42,12 +39,13 @@ final class NebulaService {
         pollTimer = nil
     }
 
-    /// Ask the helper which Nebula processes are running, match them to connections.
     private func pollRunningProcesses(stateUpdate: @escaping ([String: ConnectionState]) -> Void) {
-        guard let helper = helperManager.getHelperProxy() else { return }
+        guard let helper = helperManager.getHelperProxy() else {
+            log.warning("Polling: cannot get helper proxy")
+            return
+        }
 
         helper.getRunningProcesses { processes in
-            // processes: [pidString: configPath]
             DispatchQueue.main.async {
                 stateUpdate(
                     processes.reduce(into: [:]) { result, entry in
@@ -65,14 +63,14 @@ final class NebulaService {
 
     // MARK: - Connection Lifecycle
 
-    /// Start a Nebula connection.
+    /// Start a Nebula connection. Returns error message or nil on success.
     func start(connection: ConnectionConfig) -> String? {
         guard let binary = nebulaBinary else {
-            log.error("Nebula binary not found")
-            return "Nebula binary not found"
+            let msg = "Nebula binary not found"
+            log.error(msg)
+            return msg
         }
 
-        // Validate before starting
         let errors = validator.validateConnection(connection)
         if !errors.isEmpty {
             let msg = errors.map(\.localizedDescription).joined(separator: "; ")
@@ -81,14 +79,17 @@ final class NebulaService {
         }
 
         guard let helper = helperManager.getHelperProxy() else {
-            return "Cannot connect to privileged helper"
+            let msg = "Cannot connect to privileged helper"
+            log.error(msg)
+            return msg
         }
 
         let logPath = Constants.Paths.logs
             .appendingPathComponent("\(connection.id).log")
             .path
 
-        // Fire and forget — polling will pick up the new process
+        log.info("Requesting helper to start '\(connection.name)' with config \(connection.configURL.path)")
+
         helper.startNebula(
             binaryPath: binary.path,
             configPath: connection.configURL.path,
@@ -97,20 +98,25 @@ final class NebulaService {
             if success {
                 self?.log.info("Started '\(connection.name)' with PID \(message)")
             } else {
-                self?.log.error("Failed to start '\(connection.name)': \(message)")
+                self?.log.error("Helper failed to start '\(connection.name)': \(message)")
             }
         }
 
-        return nil // no error
+        return nil
     }
 
     /// Stop a running Nebula connection.
     func stop(pid: Int32, connectionName: String) {
-        guard let helper = helperManager.getHelperProxy() else { return }
+        guard let helper = helperManager.getHelperProxy() else {
+            log.error("Stop '\(connectionName)': cannot get helper proxy")
+            return
+        }
+
+        log.info("Requesting helper to stop '\(connectionName)' (PID \(pid))")
 
         helper.stopNebula(pid: pid) { [weak self] success, message in
             if success {
-                self?.log.info("Stopped '\(connectionName)' (PID \(pid))")
+                self?.log.info("Stopped '\(connectionName)': \(message)")
             } else {
                 self?.log.error("Failed to stop '\(connectionName)': \(message)")
             }
@@ -119,19 +125,17 @@ final class NebulaService {
 
     /// Restart a running Nebula connection.
     func restart(connection: ConnectionConfig, pid: Int32) {
+        log.info("Restarting '\(connection.name)' (PID \(pid))")
         stop(pid: pid, connectionName: connection.name)
-        // Give it a moment to clean up, then start
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             _ = self?.start(connection: connection)
         }
     }
 
-    /// Refresh the Nebula binary location.
     func refreshBinary() {
         nebulaBinary = binaryLocator.locate()
     }
 
-    /// Extract Nebula IP from a connection's certificate.
     func extractIP(for connection: ConnectionConfig) -> String? {
         guard let binary = nebulaBinary,
               let parsed = try? configParser.parse(at: connection.configPath),

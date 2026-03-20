@@ -39,8 +39,8 @@ targets:
           cp "${SRCROOT}/NebulaGatewayHelper/launchd.plist" "${APP}/Contents/Library/LaunchDaemons/com.nebulagateway.helper.plist"
           # Copy helper binary into app bundle
           cp "${BUILT_PRODUCTS_DIR}/com.nebulagateway.helper" "${APP}/Contents/MacOS/com.nebulagateway.helper"
-          # Re-sign helper inside the bundle
-          codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --entitlements "${SRCROOT}/NebulaGatewayHelper/NebulaGatewayHelper.entitlements" "${APP}/Contents/MacOS/com.nebulagateway.helper"
+          # Re-sign helper inside the bundle (must preserve identifier for XPC)
+          codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier "com.nebulagateway.helper" --entitlements "${SRCROOT}/NebulaGatewayHelper/NebulaGatewayHelper.entitlements" "${APP}/Contents/MacOS/com.nebulagateway.helper"
           # Re-sign the entire app bundle (seal was broken by adding files)
           codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --entitlements "${SRCROOT}/NebulaGateway/NebulaGateway.entitlements" "${APP}"
 

@@ -5,6 +5,7 @@ import Foundation
 import OSLog
 
 /// Unified logger that writes to both os_log and a user-accessible file.
+/// Rotation: if the log file is older than 24 hours, it gets replaced on app launch.
 final class AppLogger: @unchecked Sendable {
 
     static let shared = AppLogger()
@@ -24,10 +25,10 @@ final class AppLogger: @unchecked Sendable {
 
         do {
             try FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+            Self.rotateIfOlderThan24Hours(logFile)
             if !FileManager.default.fileExists(atPath: logFile.path) {
                 FileManager.default.createFile(atPath: logFile.path, contents: nil)
             }
-            Self.rotateIfNeeded(logFile)
             fileHandle = try FileHandle(forWritingTo: logFile)
             fileHandle?.seekToEndOfFile()
         } catch {
@@ -94,27 +95,21 @@ final class AppLogger: @unchecked Sendable {
 
     // MARK: - Log Rotation
 
-    private static func rotateIfNeeded(_ logFile: URL) {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: logFile.path),
-              let size = attrs[.size] as? UInt64,
-              size > Constants.Logging.maxFileSize
+    /// If the log file is older than 24 hours, delete it and start fresh.
+    private static func rotateIfOlderThan24Hours(_ logFile: URL) {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: logFile.path),
+              let attrs = try? fm.attributesOfItem(atPath: logFile.path),
+              let modified = attrs[.modificationDate] as? Date
         else { return }
 
-        let fm = FileManager.default
-        let dir = logFile.deletingLastPathComponent()
-        let name = logFile.deletingPathExtension().lastPathComponent
-        let ext = logFile.pathExtension
-
-        // Shift existing rotated files
-        for i in stride(from: Constants.Logging.maxFileCount - 1, through: 1, by: -1) {
-            let src = dir.appendingPathComponent("\(name).\(i).\(ext)")
-            let dst = dir.appendingPathComponent("\(name).\(i + 1).\(ext)")
-            try? fm.removeItem(at: dst)
-            try? fm.moveItem(at: src, to: dst)
+        let age = Date().timeIntervalSince(modified)
+        if age > 24 * 60 * 60 {
+            // Keep one backup
+            let backup = logFile.deletingPathExtension()
+                .appendingPathExtension("previous.log")
+            try? fm.removeItem(at: backup)
+            try? fm.moveItem(at: logFile, to: backup)
         }
-
-        let rotated = dir.appendingPathComponent("\(name).1.\(ext)")
-        try? fm.moveItem(at: logFile, to: rotated)
-        fm.createFile(atPath: logFile.path, contents: nil)
     }
 }

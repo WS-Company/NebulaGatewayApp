@@ -32,6 +32,13 @@ final class AppState {
 
     private let log = AppLogger.shared
 
+    /// Cache: connection ID → Nebula IP (extracted once, reused)
+    private var cachedIPs: [String: String] = [:]
+    /// Cache: Nebula IP → interface name
+    private var cachedInterfaces: [String: String] = [:]
+    /// Counter for periodic heartbeat log (every 20 polls = ~60s)
+    private var pollCount = 0
+
     // MARK: - Initialization
 
     func initialize() {
@@ -40,20 +47,16 @@ final class AppState {
         let config = configStorage.loadConfig()
         connections = config.connections
 
-        // Initialize states for all connections
         for conn in connections {
             connectionStates[conn.id] = ConnectionState()
         }
 
-        // Check helper
         helperManager.checkStatus()
 
-        // Start polling for running processes (picks up already-running nebula)
         nebulaService.startPolling { [weak self] runningByConfigPath in
             self?.updateFromPoll(runningByConfigPath)
         }
 
-        // Start network speed monitor
         networkMonitor.start { [weak self] interfaceName, speedIn, speedOut, totalIn, totalOut in
             DispatchQueue.main.async {
                 self?.updateSpeed(
@@ -71,32 +74,53 @@ final class AppState {
     // MARK: - Connection Actions
 
     func startConnection(_ id: String) {
-        guard let connection = connections.first(where: { $0.id == id }) else { return }
+        guard let connection = connections.first(where: { $0.id == id }) else {
+            log.error("startConnection: connection '\(id)' not found")
+            return
+        }
+        log.info("Starting connection '\(connection.name)'")
         connectionStates[id]?.status = .connecting
 
         if let error = nebulaService.start(connection: connection) {
+            log.error("Start failed for '\(connection.name)': \(error)")
             connectionStates[id]?.status = .error(error)
         }
-        // Polling will pick up the running state
     }
 
     func stopConnection(_ id: String) {
-        guard let connection = connections.first(where: { $0.id == id }),
-              let state = connectionStates[id],
-              let pid = state.pid
-        else { return }
+        guard let connection = connections.first(where: { $0.id == id }) else {
+            log.error("stopConnection: connection '\(id)' not found")
+            return
+        }
+        guard let state = connectionStates[id] else {
+            log.error("stopConnection: no state for '\(connection.name)'")
+            return
+        }
+        guard let pid = state.pid else {
+            log.error("stopConnection: no PID for '\(connection.name)' (status: \(state.status))")
+            return
+        }
 
+        log.info("Stopping connection '\(connection.name)' (PID \(pid))")
         connectionStates[id]?.status = .disconnecting
         nebulaService.stop(pid: pid, connectionName: connection.name)
-        // Polling will pick up the stopped state
     }
 
     func restartConnection(_ id: String) {
-        guard let connection = connections.first(where: { $0.id == id }),
-              let state = connectionStates[id],
-              let pid = state.pid
-        else { return }
+        guard let connection = connections.first(where: { $0.id == id }) else {
+            log.error("restartConnection: connection '\(id)' not found")
+            return
+        }
+        guard let state = connectionStates[id] else {
+            log.error("restartConnection: no state for '\(connection.name)'")
+            return
+        }
+        guard let pid = state.pid else {
+            log.error("restartConnection: no PID for '\(connection.name)' (status: \(state.status))")
+            return
+        }
 
+        log.info("Restarting connection '\(connection.name)' (PID \(pid))")
         connectionStates[id]?.status = .connecting
         nebulaService.restart(connection: connection, pid: pid)
     }
@@ -115,6 +139,8 @@ final class AppState {
     func updateConnection(_ connection: ConnectionConfig) {
         guard let index = connections.firstIndex(where: { $0.id == connection.id }) else { return }
         connections[index] = connection
+        // Invalidate caches for this connection
+        cachedIPs.removeValue(forKey: connection.id)
         persistConfig()
     }
 
@@ -125,6 +151,7 @@ final class AppState {
         configStorage.deleteLocalStorage(for: id)
         connections.removeAll { $0.id == id }
         connectionStates.removeValue(forKey: id)
+        cachedIPs.removeValue(forKey: id)
         if selectedConnectionId == id {
             selectedConnectionId = nil
         }
@@ -153,37 +180,76 @@ final class AppState {
 
     /// Match running processes (by config path) to our connections and update states.
     private func updateFromPoll(_ runningByConfigPath: [String: ConnectionState]) {
+        pollCount += 1
+
+        // Heartbeat log every ~60 seconds (20 * 3s)
+        if pollCount % 20 == 0 {
+            let running = connectionStates.values.filter { $0.isRunning }.count
+            log.debug("Polling heartbeat: \(connections.count) connections, \(running) running, \(runningByConfigPath.count) detected")
+        }
+
         for conn in connections {
             let resolvedPath = conn.configURL.path
 
             if let runningState = runningByConfigPath[resolvedPath] {
-                // This connection's nebula is running
                 var state = runningState
-                // Preserve speed data from previous state
+
+                // Preserve speed data and cached interface from previous state
                 if let existing = connectionStates[conn.id] {
                     state.speedIn = existing.speedIn
                     state.speedOut = existing.speedOut
                     state.bytesIn = existing.bytesIn
                     state.bytesOut = existing.bytesOut
                     state.interfaceName = existing.interfaceName
+                    state.nebulaIP = existing.nebulaIP
                 }
-                // Extract IP if not yet known
+
+                // Extract IP once and cache
                 if state.nebulaIP == nil {
-                    state.nebulaIP = nebulaService.extractIP(for: conn)
+                    if let cached = cachedIPs[conn.id] {
+                        state.nebulaIP = cached
+                    } else if let ip = nebulaService.extractIP(for: conn) {
+                        state.nebulaIP = ip
+                        cachedIPs[conn.id] = ip
+                        log.info("Resolved Nebula IP for '\(conn.name)': \(ip)")
+                    }
                 }
-                // Detect interface by Nebula IP if not yet known
+
+                // Detect interface once and cache
                 if state.interfaceName == nil, let ip = state.nebulaIP {
-                    state.interfaceName = detectInterface(forIP: ip)
+                    if let cached = cachedInterfaces[ip] {
+                        state.interfaceName = cached
+                    } else if let iface = detectInterface(forIP: ip) {
+                        state.interfaceName = iface
+                        cachedInterfaces[ip] = iface
+                    }
                 }
+
+                // Log transition to connected
+                if connectionStates[conn.id]?.status != .connected {
+                    log.info("Connection '\(conn.name)' is now connected (PID \(state.pid ?? 0))")
+                }
+
                 connectionStates[conn.id] = state
+
             } else {
                 // Not running
                 let current = connectionStates[conn.id]
+
                 if current?.status == .connecting {
-                    // Still starting, don't overwrite yet (give it a few poll cycles)
+                    // Give it a few poll cycles to start (max ~15 seconds)
+                    // After that, mark as disconnected
+                    if pollCount % 5 == 0 {
+                        log.warning("Connection '\(conn.name)' still in connecting state, resetting")
+                        connectionStates[conn.id] = ConnectionState(status: .disconnected)
+                    }
                 } else if current?.status != .disconnected {
-                    // Was running/disconnecting/error, now confirmed stopped
+                    log.info("Connection '\(conn.name)' is now disconnected (was \(String(describing: current?.status)))")
                     connectionStates[conn.id] = ConnectionState(status: .disconnected)
+                    // Clear interface cache (interface gone)
+                    if let ip = current?.nebulaIP {
+                        cachedInterfaces.removeValue(forKey: ip)
+                    }
                 }
             }
         }

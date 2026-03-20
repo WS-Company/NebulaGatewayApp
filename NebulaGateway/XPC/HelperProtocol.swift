@@ -8,7 +8,7 @@ import Foundation
 
 /// XPC protocol for communicating with the privileged helper daemon.
 /// The helper runs as root and manages Nebula processes.
-@objc protocol HelperProtocol {
+@objc(HelperProtocol) protocol HelperProtocol {
 
     /// Start a Nebula process with the given config file.
     /// - Parameters:

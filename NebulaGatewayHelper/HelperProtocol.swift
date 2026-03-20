@@ -6,7 +6,7 @@
 
 import Foundation
 
-@objc protocol HelperProtocol {
+@objc(HelperProtocol) protocol HelperProtocol {
 
     func startNebula(
         binaryPath: String,
