@@ -16,6 +16,7 @@ final class NebulaService {
 
     private(set) var nebulaBinary: NebulaBinaryLocator.Result?
     private var pollTimer: Timer?
+    private var pollStateUpdate: (([String: ConnectionState]) -> Void)?
 
     init(helperManager: HelperManager) {
         self.helperManager = helperManager
@@ -26,10 +27,14 @@ final class NebulaService {
 
     func startPolling(stateUpdate: @escaping ([String: ConnectionState]) -> Void) {
         stopPolling()
+        // Kept here, not captured by the timer: the timer block is @Sendable, and sending a non-Sendable
+        // closure from it to the main actor is an error since Xcode 27.
+        pollStateUpdate = stateUpdate
         pollRunningProcesses(stateUpdate: stateUpdate)
         pollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.pollRunningProcesses(stateUpdate: stateUpdate)
+                guard let self, let stateUpdate = self.pollStateUpdate else { return }
+                self.pollRunningProcesses(stateUpdate: stateUpdate)
             }
         }
     }
@@ -37,6 +42,7 @@ final class NebulaService {
     func stopPolling() {
         pollTimer?.invalidate()
         pollTimer = nil
+        pollStateUpdate = nil
     }
 
     private func pollRunningProcesses(stateUpdate: @escaping ([String: ConnectionState]) -> Void) {

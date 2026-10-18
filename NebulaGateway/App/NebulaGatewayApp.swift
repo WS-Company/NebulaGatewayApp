@@ -6,7 +6,7 @@ import SwiftUI
 @main
 struct NebulaGatewayApp: App {
 
-    @State private var appState = AppState()
+    @State private var appState = AppState.shared
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
@@ -35,7 +35,8 @@ struct NebulaGatewayApp: App {
     }
 
     init() {
-        appState.initialize()
+        // AppState.shared initializes itself (connections, helper check, polling) on first access
+        _ = AppState.shared
         // Hide from Dock on launch
         NSApplication.shared.setActivationPolicy(.accessory)
     }

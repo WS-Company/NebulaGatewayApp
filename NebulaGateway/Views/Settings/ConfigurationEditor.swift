@@ -77,7 +77,8 @@ struct ConfigurationEditor: View {
                         systemImage: "square.and.arrow.down"
                     )
                 }
-                .disabled(isRunning)
+                // Same rule as Save: the move saves unsaved edits first
+                .disabled(isRunning || name.isEmpty)
                 .help(isRunning ? "Stop the connection before moving to local storage" : "")
             }
 
@@ -208,7 +209,18 @@ struct ConfigurationEditor: View {
 
     // MARK: - Local Storage
 
+    /// Editor fields differ from the stored connection (e.g. a config was chosen but Save not pressed).
+    private var hasUnsavedChanges: Bool {
+        guard let conn = appState.connections.first(where: { $0.id == connectionId }) else { return false }
+        return conn.name != name || conn.configPath != configPath || conn.localStorage != isLocalStorage
+    }
+
     private func moveToLocal() {
+        // The move works from the stored connection: without this, a just-chosen config
+        // failed with "Cannot read config at" until Save was pressed.
+        if hasUnsavedChanges {
+            save()
+        }
         do {
             try appState.moveToLocalStorage(connectionId)
             loadConnection()

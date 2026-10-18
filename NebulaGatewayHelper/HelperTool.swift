@@ -7,7 +7,7 @@ import Foundation
 /// Executes Nebula commands with root privileges on behalf of the main app.
 final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchecked Sendable {
 
-    private let version = "1.0.2"
+    private let version = "1.0.3"
 
     /// Maps PID → (Process, configPath) for tracking Nebula processes we started.
     private var trackedProcesses: [Int32: (process: Process, configPath: String)] = [:]

@@ -41,6 +41,16 @@ final class AppState {
 
     // MARK: - Initialization
 
+    /// The app's single state, initialized once at launch.
+    /// SwiftUI may evaluate `@State`'s initial value more than once: built with Xcode 27, it initialized the
+    /// first instance in `App.init`, threw it away and showed a second, never-initialized one (no connections,
+    /// no helper check, polling stopped with the dead instance).
+    static let shared: AppState = {
+        let state = AppState()
+        state.initialize()
+        return state
+    }()
+
     func initialize() {
         configStorage.ensureDirectories()
 

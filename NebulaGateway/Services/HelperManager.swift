@@ -12,6 +12,8 @@ final class HelperManager {
 
     private var xpcConnection: NSXPCConnection?
     private var xpcConnectionValid = false
+    /// Bumped on every new connection, so a late handler of an old connection can't break the current one.
+    private var connectionGeneration = 0
     private let log = AppLogger.shared
 
     // MARK: - Helper Installation
@@ -94,27 +96,32 @@ final class HelperManager {
 
     /// Get a proxy to the helper for executing commands.
     /// Returns nil if connection fails.
+    ///
+    /// XPC calls the error, interruption and invalidation handlers on its own background queue. A closure
+    /// written here would be inferred as @MainActor, and Swift 6 checks that at runtime: the app trapped
+    /// (SIGTRAP) at launch on a Mac without the helper installed. So the handlers are @Sendable and hop
+    /// to the main actor explicitly.
     func getHelperProxy() -> HelperProtocol? {
         if let existing = xpcConnection, xpcConnectionValid {
-            return existing.remoteObjectProxyWithErrorHandler { [weak self] error in
-                AppLogger.shared.error("XPC proxy error: \(error.localizedDescription)")
-                self?.xpcConnectionValid = false
-            } as? HelperProtocol
+            return existing.remoteObjectProxyWithErrorHandler(
+                proxyErrorHandler(generation: connectionGeneration)
+            ) as? HelperProtocol
         }
 
         // Create new connection (or reconnect after invalidation)
         xpcConnection?.invalidate()
+        connectionGeneration += 1
+        let generation = connectionGeneration
 
         let conn = NSXPCConnection(machServiceName: Constants.helperBundleId, options: .privileged)
         conn.remoteObjectInterface = NSXPCInterface(with: HelperProtocol.self)
-        conn.interruptionHandler = { [weak self] in
+        conn.interruptionHandler = { @Sendable [weak self] in
             AppLogger.shared.warning("XPC connection interrupted — will reconnect")
-            self?.xpcConnectionValid = false
+            Task { @MainActor in self?.connectionFailed(generation: generation, drop: false) }
         }
-        conn.invalidationHandler = { [weak self] in
+        conn.invalidationHandler = { @Sendable [weak self] in
             AppLogger.shared.warning("XPC connection invalidated — will reconnect")
-            self?.xpcConnectionValid = false
-            self?.xpcConnection = nil
+            Task { @MainActor in self?.connectionFailed(generation: generation, drop: true) }
         }
         conn.resume()
 
@@ -122,10 +129,21 @@ final class HelperManager {
         xpcConnectionValid = true
         log.info("XPC connection established to helper")
 
-        return conn.remoteObjectProxyWithErrorHandler { [weak self] error in
+        return conn.remoteObjectProxyWithErrorHandler(proxyErrorHandler(generation: generation)) as? HelperProtocol
+    }
+
+    private func proxyErrorHandler(generation: Int) -> @Sendable (any Error) -> Void {
+        { @Sendable [weak self] error in
             AppLogger.shared.error("XPC proxy error: \(error.localizedDescription)")
-            self?.xpcConnectionValid = false
-        } as? HelperProtocol
+            Task { @MainActor in self?.connectionFailed(generation: generation, drop: false) }
+        }
+    }
+
+    /// Marks the connection broken so the next call reconnects. Ignores reports from an older connection.
+    private func connectionFailed(generation: Int, drop: Bool) {
+        guard generation == connectionGeneration else { return }
+        xpcConnectionValid = false
+        if drop { xpcConnection = nil }
     }
 
     // MARK: - Private
