@@ -78,9 +78,19 @@ final class HelperManager {
 
         switch service.status {
         case .enabled:
-            ping { [weak self] success in
+            ping { [weak self] version in
                 DispatchQueue.main.async {
-                    self?.status = success ? .ready : .error("Helper not responding")
+                    switch version {
+                    case nil:
+                        self?.status = .error("Helper not responding")
+                    case Constants.helperVersion:
+                        self?.status = .ready
+                    case let other?:
+                        self?.log.warning("Helper \(other) is running, the app needs \(Constants.helperVersion)")
+                        self?.status = .error(
+                            "Helper \(other) is outdated. Restart it: sudo pkill -x \(Constants.helperBundleId)"
+                        )
+                    }
                 }
             }
         case .notRegistered, .notFound:
@@ -153,13 +163,14 @@ final class HelperManager {
         xpcConnection = nil
     }
 
-    private func ping(reply: @escaping (Bool) -> Void) {
+    /// Replies with the helper version, or nil if it does not answer.
+    private func ping(reply: @escaping (String?) -> Void) {
         guard let helper = getHelperProxy() else {
-            reply(false)
+            reply(nil)
             return
         }
         helper.ping { version in
-            reply(!version.isEmpty)
+            reply(version.isEmpty ? nil : version)
         }
     }
 }

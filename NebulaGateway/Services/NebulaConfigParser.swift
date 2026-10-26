@@ -94,8 +94,7 @@ struct NebulaConfigParser {
     }
 
     /// Extract the Nebula IP from a certificate file using nebula-cert print.
-    func extractIP(fromCert certPath: String, nebulaBinary: String) -> String? {
-        let certBinary = nebulaBinary.replacingOccurrences(of: "/nebula", with: "/nebula-cert")
+    func extractIP(fromCert certPath: String, nebulaCert certBinary: String) -> String? {
         let expanded = (certPath as NSString).expandingTildeInPath
 
         guard FileManager.default.isExecutableFile(atPath: certBinary) else {

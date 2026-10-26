@@ -9,9 +9,8 @@ import Foundation
 @objc(HelperProtocol) protocol HelperProtocol {
 
     func startNebula(
-        binaryPath: String,
+        connectionId: String,
         configPath: String,
-        logPath: String,
         reply: @escaping (_ success: Bool, _ message: String) -> Void
     )
 

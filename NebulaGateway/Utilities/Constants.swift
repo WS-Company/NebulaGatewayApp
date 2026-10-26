@@ -8,6 +8,8 @@ enum Constants {
     static let appName = "Nebula Gateway"
     static let appBundleId = "com.nebulagateway.app"
     static let helperBundleId = "com.nebulagateway.helper"
+    /// The helper version this app talks to; an older helper has a different XPC protocol.
+    static let helperVersion = "1.1.0"
     static let githubURL = URL(string: "https://github.com/WS-Company/NebulaGatewayApp")!
     static let nebulaGithubURL = URL(string: "https://github.com/slackhq/nebula")!
 
@@ -49,14 +51,10 @@ enum Constants {
 
     // MARK: - Nebula Binary Locations
 
+    /// Official nebula binaries shipped inside the app (tools/fetch-nebula.sh).
     enum NebulaBinary {
-        static let brewAppleSilicon = "/opt/homebrew/bin/nebula"
-        static let brewIntel = "/usr/local/bin/nebula"
-        static let bundledSubpath = "Contents/Resources/nebula"
-
-        static var allBrewPaths: [String] {
-            [brewAppleSilicon, brewIntel]
-        }
+        static let bundledSubpath = "Contents/Helpers/nebula"
+        static let bundledCertSubpath = "Contents/Helpers/nebula-cert"
     }
 
     // MARK: - Network Monitoring

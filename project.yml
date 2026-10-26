@@ -31,16 +31,32 @@ targets:
     dependencies:
       - target: NebulaGatewayHelper
     postBuildScripts:
-      - name: "Embed Helper binary and LaunchDaemon plist"
+      - name: "Embed Helper, nebula and LaunchDaemon plist"
         script: |
+          set -e
           APP="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app"
           # Copy LaunchDaemon plist
           mkdir -p "${APP}/Contents/Library/LaunchDaemons"
           cp "${SRCROOT}/NebulaGatewayHelper/launchd.plist" "${APP}/Contents/Library/LaunchDaemons/com.nebulagateway.helper.plist"
+          # Official nebula from tools/fetch-nebula.sh, kept as signed by Defined Networking.
+          # The helper runs it only if its sha256 matches BundledNebula.swift, so the build checks the same.
+          VENDOR="${SRCROOT}/Vendor/nebula"
+          if [ ! -f "${VENDOR}/nebula" ] || [ ! -f "${VENDOR}/nebula-cert" ]; then
+            echo "error: ${VENDOR} is missing nebula; run tools/fetch-nebula.sh"
+            exit 1
+          fi
+          EXPECTED=$(sed -n 's/.*sha256 = "\([0-9a-f]*\)".*/\1/p' "${SRCROOT}/NebulaGatewayHelper/BundledNebula.swift")
+          ACTUAL=$(shasum -a 256 "${VENDOR}/nebula" | cut -d' ' -f1)
+          if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+            echo "error: ${VENDOR}/nebula sha256 ${ACTUAL} does not match BundledNebula.sha256 ${EXPECTED}"
+            exit 1
+          fi
+          mkdir -p "${APP}/Contents/Helpers"
+          cp "${VENDOR}/nebula" "${VENDOR}/nebula-cert" "${APP}/Contents/Helpers/"
           # Copy helper binary into app bundle
           cp "${BUILT_PRODUCTS_DIR}/com.nebulagateway.helper" "${APP}/Contents/MacOS/com.nebulagateway.helper"
           # Re-sign helper inside the bundle (must preserve identifier for XPC)
-          codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier "com.nebulagateway.helper" --entitlements "${SRCROOT}/NebulaGatewayHelper/NebulaGatewayHelper.entitlements" "${APP}/Contents/MacOS/com.nebulagateway.helper"
+          codesign --force --options runtime --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier "com.nebulagateway.helper" --entitlements "${SRCROOT}/NebulaGatewayHelper/NebulaGatewayHelper.entitlements" "${APP}/Contents/MacOS/com.nebulagateway.helper"
           # Re-sign the entire app bundle (seal was broken by adding files)
           codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --entitlements "${SRCROOT}/NebulaGateway/NebulaGateway.entitlements" "${APP}"
 

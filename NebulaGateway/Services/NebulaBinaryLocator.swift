@@ -3,50 +3,43 @@
 
 import Foundation
 
-/// Locates the Nebula binary on the system.
-/// Priority: Homebrew installation > bundled binary in app resources.
+/// Locates the Nebula binaries shipped inside the app (Contents/Helpers).
+/// The helper runs its own root-owned copy of `nebula`; the app uses these paths for the version and `nebula-cert`.
 struct NebulaBinaryLocator {
 
     struct Result {
         let path: String
+        let certPath: String
         let version: String
         let source: Source
     }
 
     enum Source: String {
-        case homebrew = "Homebrew"
         case bundled = "Bundled"
     }
 
     private let fileManager = FileManager.default
     private let log = AppLogger.shared
 
-    /// Find the best available Nebula binary.
-    /// Returns nil if no binary is found.
+    /// Find the bundled Nebula binary.
+    /// Returns nil if it is missing from the app bundle.
     func locate() -> Result? {
-        // 1. Check Homebrew paths
-        for brewPath in Constants.NebulaBinary.allBrewPaths {
-            if let result = verify(path: brewPath, source: .homebrew) {
-                log.info("Using Homebrew Nebula at \(brewPath) (v\(result.version))")
-                return result
-            }
+        let bundle = Bundle.main.bundleURL
+        let path = bundle.appendingPathComponent(Constants.NebulaBinary.bundledSubpath).path
+        let certPath = bundle.appendingPathComponent(Constants.NebulaBinary.bundledCertSubpath).path
+
+        if let result = verify(path: path, certPath: certPath) {
+            log.info("Using bundled Nebula at \(path) (v\(result.version))")
+            return result
         }
 
-        // 2. Check bundled binary
-        if let bundlePath = Bundle.main.path(forResource: "nebula", ofType: nil) {
-            if let result = verify(path: bundlePath, source: .bundled) {
-                log.info("Using bundled Nebula at \(bundlePath) (v\(result.version))")
-                return result
-            }
-        }
-
-        log.error("No Nebula binary found")
+        log.error("No Nebula binary found in the app bundle")
         return nil
     }
 
     // MARK: - Private
 
-    private func verify(path: String, source: Source) -> Result? {
+    private func verify(path: String, certPath: String) -> Result? {
         guard fileManager.isExecutableFile(atPath: path) else {
             return nil
         }
@@ -56,7 +49,7 @@ struct NebulaBinaryLocator {
             return nil
         }
 
-        return Result(path: path, version: version, source: source)
+        return Result(path: path, certPath: certPath, version: version, source: .bundled)
     }
 
     /// Runs `nebula --version` and parses the output.

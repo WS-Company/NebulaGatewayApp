@@ -71,7 +71,7 @@ final class NebulaService {
 
     /// Start a Nebula connection. Returns error message or nil on success.
     func start(connection: ConnectionConfig) -> String? {
-        guard let binary = nebulaBinary else {
+        guard nebulaBinary != nil else {
             let msg = "Nebula binary not found"
             log.error(msg)
             return msg
@@ -90,16 +90,11 @@ final class NebulaService {
             return msg
         }
 
-        let logPath = Constants.Paths.logs
-            .appendingPathComponent("\(connection.id).log")
-            .path
-
         log.info("Requesting helper to start '\(connection.name)' with config \(connection.configURL.path)")
 
         helper.startNebula(
-            binaryPath: binary.path,
-            configPath: connection.configURL.path,
-            logPath: logPath
+            connectionId: connection.id,
+            configPath: connection.configURL.path
         ) { [weak self] success, message in
             if success {
                 self?.log.info("Started '\(connection.name)' with PID \(message)")
@@ -148,6 +143,6 @@ final class NebulaService {
               let certPath = parsed.certPath
         else { return nil }
 
-        return configParser.extractIP(fromCert: certPath, nebulaBinary: binary.path)
+        return configParser.extractIP(fromCert: certPath, nebulaCert: binary.certPath)
     }
 }

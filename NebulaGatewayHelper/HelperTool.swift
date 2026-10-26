@@ -1,21 +1,35 @@
 // HelperTool.swift
 // NebulaGatewayHelper
 
+import CryptoKit
 import Foundation
 
 /// The privileged helper tool that runs as a LaunchDaemon.
-/// Executes Nebula commands with root privileges on behalf of the main app.
+/// Starts and stops Nebula with root privileges on behalf of the main app, and only for it.
 final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchecked Sendable {
 
-    private let version = "1.0.3"
+    private let version = "1.1.0"
+
+    /// Only our signed app may connect: its bundle id and our team.
+    private static let clientRequirement =
+        "anchor apple generic and identifier \"com.nebulagateway.app\" and certificate leaf[subject.OU] = \"ZUQ8Q4D64R\""
+
+    /// Root-owned copy of the bundled nebula; the only binary the helper runs.
+    private static let supportDir = "/Library/Application Support/NebulaGateway"
+    private static let binDir = supportDir + "/bin"
+    private static let binaryPath = binDir + "/nebula"
+    private static let logDir = "/Library/Logs/NebulaGateway"
 
     /// Maps PID → (Process, configPath) for tracking Nebula processes we started.
     private var trackedProcesses: [Int32: (process: Process, configPath: String)] = [:]
     private let processLock = NSLock()
+    private let installLock = NSLock()
 
     // MARK: - NSXPCListenerDelegate
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
+        // The system drops messages from any client that does not meet the requirement.
+        connection.setCodeSigningRequirement(Self.clientRequirement)
         connection.exportedInterface = NSXPCInterface(with: HelperProtocol.self)
         connection.exportedObject = self
         connection.resume()
@@ -25,26 +39,35 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
     // MARK: - HelperProtocol
 
     func startNebula(
-        binaryPath: String,
+        connectionId: String,
         configPath: String,
-        logPath: String,
         reply: @escaping (Bool, String) -> Void
     ) {
-        guard isValidNebulaBinary(binaryPath) else {
-            reply(false, "Invalid Nebula binary path: \(binaryPath)")
+        guard Self.isValidConnectionId(connectionId) else {
+            reply(false, "Invalid connection id: \(connectionId)")
             return
         }
 
-        guard FileManager.default.fileExists(atPath: configPath) else {
-            reply(false, "Config file not found: \(configPath)")
+        guard let uid = NSXPCConnection.current()?.effectiveUserIdentifier,
+              Self.isAllowedConfig(configPath, uid: uid)
+        else {
+            reply(false, "The config must be in the app's local storage. Use \"Move to local storage\" first.")
             return
         }
 
+        do {
+            try installBinary()
+        } catch {
+            reply(false, "Nebula binary: \(error.localizedDescription)")
+            return
+        }
+
+        let logPath = Self.logDir + "/\(connectionId).log"
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: binaryPath)
+        process.executableURL = URL(fileURLWithPath: Self.binaryPath)
         process.arguments = ["-config", configPath]
 
-        if let logFileHandle = createLogHandle(at: logPath) {
+        if let logFileHandle = Self.openLog(at: logPath) {
             process.standardOutput = logFileHandle
             process.standardError = logFileHandle
         }
@@ -67,8 +90,7 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
             let exitPid = proc.processIdentifier
             let exitCode = proc.terminationStatus
             // Write termination info to the nebula log
-            if let handle = FileHandle(forWritingAtPath: logPath) {
-                handle.seekToEndOfFile()
+            if let handle = Self.openLog(at: logPath) {
                 let msg = "\n[NebulaGatewayHelper] Process PID \(exitPid) terminated with exit code \(exitCode)\n"
                 handle.write(msg.data(using: .utf8) ?? Data())
                 try? handle.close()
@@ -82,6 +104,11 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
     }
 
     func stopNebula(pid: Int32, reply: @escaping (Bool, String) -> Void) {
+        guard pid > 0 else {
+            reply(false, "Invalid PID \(pid)")
+            return
+        }
+
         processLock.lock()
         let tracked = trackedProcesses[pid]
         processLock.unlock()
@@ -104,13 +131,17 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
             return
         }
 
-        // Not tracked — try kill by PID (process started outside helper)
-        let result = kill(pid, SIGTERM)
-        if result == 0 {
+        // Not tracked: still ours if it runs our copy of nebula (the list is empty after a helper restart).
+        guard Self.executablePath(of: pid) == Self.binaryPath else {
+            reply(false, "PID \(pid) was not started by Nebula Gateway; stop it from the terminal")
+            return
+        }
+
+        if kill(pid, SIGTERM) == 0 {
             reply(true, "Sent SIGTERM to PID \(pid)")
         } else {
             let err = String(cString: strerror(errno))
-            reply(false, "Failed to kill PID \(pid): \(err)")
+            reply(false, "Failed to stop PID \(pid): \(err)")
         }
     }
 
@@ -212,68 +243,130 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
 
     // MARK: - Private
 
-    private func isValidNebulaBinary(_ path: String) -> Bool {
-        let fileName = (path as NSString).lastPathComponent
-        return fileName == "nebula" && FileManager.default.isExecutableFile(atPath: path)
+    /// Connection ids look like `connection_1`; they become the log file name.
+    private static func isValidConnectionId(_ id: String) -> Bool {
+        id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil
     }
 
-    private func createLogHandle(at path: String) -> FileHandle? {
-        let dir = (path as NSString).deletingLastPathComponent
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    /// The config must be a regular file of the calling user, inside that user's local storage,
+    /// given by its canonical path (no symlinks, no `..`).
+    private static func isAllowedConfig(_ path: String, uid: uid_t) -> Bool {
+        guard let home = homeDirectory(of: uid),
+              let storage = realPath(home + "/Library/Application Support/Nebula Gateway/connections"),
+              realPath(path) == path,
+              path.hasPrefix(storage + "/")
+        else { return false }
 
-        if !FileManager.default.fileExists(atPath: path) {
-            FileManager.default.createFile(atPath: path, contents: nil)
-        }
-
-        guard let handle = FileHandle(forWritingAtPath: path) else { return nil }
-        handle.seekToEndOfFile()
-        return handle
+        var info = stat()
+        return lstat(path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFREG && info.st_uid == uid
     }
 
-    /// Scan system for running nebula processes (non-blocking, called from background).
-    private func scanSystemNebulaProcesses() -> [String: String]? {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/ps")
-        task.arguments = ["-eo", "pid,args"]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = Pipe()
+    private static func homeDirectory(of uid: uid_t) -> String? {
+        var entry = passwd()
+        var found: UnsafeMutablePointer<passwd>?
+        var buffer = [CChar](repeating: 0, count: 4096)
+        return buffer.withUnsafeMutableBufferPointer { buf -> String? in
+            guard getpwuid_r(uid, &entry, buf.baseAddress, buf.count, &found) == 0,
+                  found != nil, let dir = entry.pw_dir
+            else { return nil }
+            return String(cString: dir)
+        }
+    }
 
-        do {
-            try task.run()
-            task.waitUntilExit()
-        } catch {
-            return nil
+    private static func realPath(_ path: String) -> String? {
+        guard let resolved = realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
+    private static func executablePath(of pid: Int32) -> String? {
+        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))  // PROC_PIDPATHINFO_MAXSIZE
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+        return buffer.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+    }
+
+    /// The nebula shipped next to the helper: `<App>/Contents/Helpers/nebula`.
+    private static func bundledBinaryPath() -> String? {
+        guard let helperPath = executablePath(of: getpid()) else { return nil }
+        return URL(fileURLWithPath: helperPath)
+            .deletingLastPathComponent()  // MacOS
+            .deletingLastPathComponent()  // Contents
+            .appendingPathComponent("Helpers/nebula")
+            .path
+    }
+
+    /// Puts the bundled nebula into the root-owned bin dir unless the copy there already matches
+    /// `BundledNebula.sha256`. The new copy is checked before it replaces the old one by rename,
+    /// so a running nebula keeps its file.
+    private func installBinary() throws {
+        installLock.lock()
+        defer { installLock.unlock() }
+
+        try Self.ensureRootDirectory(Self.supportDir)
+        try Self.ensureRootDirectory(Self.binDir)
+
+        if Self.sha256(ofFile: Self.binaryPath) == BundledNebula.sha256 {
+            return
         }
 
-        guard let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) else {
-            return nil
+        guard let source = Self.bundledBinaryPath() else {
+            throw HelperError("cannot locate the app bundle")
         }
 
-        var found: [String: String] = [:]
-        for line in output.components(separatedBy: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.contains("/nebula") && trimmed.contains("-config") else { continue }
-            guard !trimmed.contains("grep") && !trimmed.contains("helper") else { continue }
+        let temp = Self.binDir + "/.nebula-\(UUID().uuidString)"
+        let fm = FileManager.default
+        try fm.copyItem(atPath: source, toPath: temp)
+        removexattr(temp, "com.apple.quarantine", XATTR_NOFOLLOW)
 
-            let parts = trimmed.split(separator: " ", maxSplits: 1)
-            guard parts.count == 2 else { continue }
-
-            let pidStr = String(parts[0]).trimmingCharacters(in: .whitespaces)
-            guard Int32(pidStr) != nil else { continue }
-
-            let args = String(parts[1])
-            if let range = args.range(of: "-config ") {
-                var configPath = String(args[range.upperBound...]).trimmingCharacters(in: .whitespaces)
-                if let spaceIdx = configPath.firstIndex(of: " ") {
-                    configPath = String(configPath[..<spaceIdx])
-                }
-                if !configPath.isEmpty {
-                    found[pidStr] = configPath
-                }
-            }
+        guard Self.sha256(ofFile: temp) == BundledNebula.sha256 else {
+            try? fm.removeItem(atPath: temp)
+            throw HelperError("the bundled nebula does not match the expected sha256")
         }
 
-        return found.isEmpty ? nil : found
+        guard chown(temp, 0, 0) == 0, chmod(temp, 0o755) == 0, rename(temp, Self.binaryPath) == 0 else {
+            let err = String(cString: strerror(errno))
+            try? fm.removeItem(atPath: temp)
+            throw HelperError("cannot install nebula: \(err)")
+        }
+    }
+
+    /// Creates the directory if needed and makes sure it is a real directory owned by root, mode 0755.
+    private static func ensureRootDirectory(_ path: String) throws {
+        if mkdir(path, 0o755) != 0 && errno != EEXIST {
+            throw HelperError("cannot create \(path): \(String(cString: strerror(errno)))")
+        }
+        var info = stat()
+        guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR else {
+            throw HelperError("\(path) is not a directory")
+        }
+        guard chown(path, 0, 0) == 0, chmod(path, 0o755) == 0 else {
+            throw HelperError("cannot set owner of \(path): \(String(cString: strerror(errno)))")
+        }
+    }
+
+    /// Opens the connection log for appending. Never follows a symlink.
+    private static func openLog(at path: String) -> FileHandle? {
+        guard (try? ensureRootDirectory(logDir)) != nil else { return nil }
+        let fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0o644)
+        guard fd >= 0 else { return nil }
+        return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    }
+
+    private static func sha256(ofFile path: String) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+private struct HelperError: LocalizedError {
+    let errorDescription: String?
+
+    init(_ message: String) {
+        errorDescription = message
     }
 }

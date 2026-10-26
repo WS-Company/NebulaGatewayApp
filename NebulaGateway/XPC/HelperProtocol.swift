@@ -11,19 +11,18 @@ import Foundation
 @objc(HelperProtocol) protocol HelperProtocol {
 
     /// Start a Nebula process with the given config file.
+    /// The helper runs its own copy of the bundled nebula and logs to /Library/Logs/NebulaGateway/<connectionId>.log.
     /// - Parameters:
-    ///   - binaryPath: Absolute path to the nebula binary.
-    ///   - configPath: Absolute path to the Nebula config.yml.
-    ///   - logPath: Absolute path for stdout/stderr redirection.
+    ///   - connectionId: Connection id (`connection_1`); names the log file.
+    ///   - configPath: Canonical path to config.yml inside the app's local storage.
     ///   - reply: Callback with (success, message). Message contains the PID on success or error details on failure.
     func startNebula(
-        binaryPath: String,
+        connectionId: String,
         configPath: String,
-        logPath: String,
         reply: @escaping (_ success: Bool, _ message: String) -> Void
     )
 
-    /// Stop a running Nebula process.
+    /// Stop a running Nebula process started by Nebula Gateway.
     /// - Parameters:
     ///   - pid: Process ID to terminate.
     ///   - reply: Callback with (success, message).
