@@ -91,7 +91,10 @@ final class AppState {
         log.info("Starting connection '\(connection.name)'")
         connectionStates[id]?.status = .connecting
 
-        if let error = nebulaService.start(connection: connection) {
+        let error = nebulaService.start(connection: connection) { [weak self] message in
+            self?.connectionStates[id]?.status = .error(message)
+        }
+        if let error {
             log.error("Start failed for '\(connection.name)': \(error)")
             connectionStates[id]?.status = .error(error)
         }
@@ -132,7 +135,9 @@ final class AppState {
 
         log.info("Restarting connection '\(connection.name)' (PID \(pid))")
         connectionStates[id]?.status = .connecting
-        nebulaService.restart(connection: connection, pid: pid)
+        nebulaService.restart(connection: connection, pid: pid) { [weak self] message in
+            self?.connectionStates[id]?.status = .error(message)
+        }
     }
 
     // MARK: - Configuration Management
@@ -253,6 +258,8 @@ final class AppState {
                         log.warning("Connection '\(conn.name)' still in connecting state, resetting")
                         connectionStates[conn.id] = ConnectionState(status: .disconnected)
                     }
+                } else if case .error? = current?.status {
+                    // Keep a start error on screen; the next Start replaces it
                 } else if current?.status != .disconnected {
                     log.info("Connection '\(conn.name)' is now disconnected (was \(String(describing: current?.status)))")
                     connectionStates[conn.id] = ConnectionState(status: .disconnected)

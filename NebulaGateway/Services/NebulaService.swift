@@ -69,8 +69,9 @@ final class NebulaService {
 
     // MARK: - Connection Lifecycle
 
-    /// Start a Nebula connection. Returns error message or nil on success.
-    func start(connection: ConnectionConfig) -> String? {
+    /// Start a Nebula connection. Returns an error message, or nil once the request is sent to the helper.
+    /// A refusal from the helper arrives later, through `onFailure` on the main queue.
+    func start(connection: ConnectionConfig, onFailure: @escaping (String) -> Void) -> String? {
         guard nebulaBinary != nil else {
             let msg = "Nebula binary not found"
             log.error(msg)
@@ -100,6 +101,7 @@ final class NebulaService {
                 self?.log.info("Started '\(connection.name)' with PID \(message)")
             } else {
                 self?.log.error("Helper failed to start '\(connection.name)': \(message)")
+                DispatchQueue.main.async { onFailure(message) }
             }
         }
 
@@ -125,11 +127,13 @@ final class NebulaService {
     }
 
     /// Restart a running Nebula connection.
-    func restart(connection: ConnectionConfig, pid: Int32) {
+    func restart(connection: ConnectionConfig, pid: Int32, onFailure: @escaping (String) -> Void) {
         log.info("Restarting '\(connection.name)' (PID \(pid))")
         stop(pid: pid, connectionName: connection.name)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            _ = self?.start(connection: connection)
+            if let error = self?.start(connection: connection, onFailure: onFailure) {
+                onFailure(error)
+            }
         }
     }
 

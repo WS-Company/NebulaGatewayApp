@@ -91,6 +91,16 @@
         }
       }
     },
+    "popover.connection.notLocal" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Move to local storage first"
+          }
+        }
+      }
+    },
     "popover.connection.connecting" : {
       "localizations" : {
         "en" : {

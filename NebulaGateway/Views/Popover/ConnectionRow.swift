@@ -58,7 +58,8 @@ struct ConnectionRow: View {
                     ) {
                         appState.startConnection(connection.id)
                     }
-                    .disabled(!appState.helperManager.status.isReady)
+                    // The helper runs only configs from the app's local storage
+                    .disabled(!appState.helperManager.status.isReady || !connection.localStorage)
 
                     Spacer()
 
@@ -73,7 +74,10 @@ struct ConnectionRow: View {
 
     private var statusText: String {
         switch state.status {
-        case .disconnected:   return String(localized: "popover.connection.notConnected")
+        case .disconnected:
+            return connection.localStorage
+                ? String(localized: "popover.connection.notConnected")
+                : String(localized: "popover.connection.notLocal")
         case .connecting:     return String(localized: "popover.connection.connecting")
         case .disconnecting:  return String(localized: "popover.connection.disconnecting")
         case .error(let msg): return msg

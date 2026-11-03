@@ -19,5 +19,6 @@ Package.resolved
 .DS_Store
 *.dSYM
 
-# Nebula binary (bundled, not committed)
+# Nebula binaries (bundled, not committed): tools/fetch-nebula.sh puts them into Vendor/
+Vendor/
 NebulaGateway/Resources/nebula
