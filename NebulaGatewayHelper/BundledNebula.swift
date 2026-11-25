@@ -5,6 +5,6 @@
 // The helper runs its root-owned copy only if the copy matches this hash. Keep in sync with NEBULA_SHA256 there.
 
 enum BundledNebula {
-    static let version = "1.11.2"
-    static let sha256 = "b2eec15124d83774e5831baeabfca6283f90c950143e21334ed2522c793e9038"
+    static let version = "1.12.0"
+    static let sha256 = "e4bd2008c52c7fe7696700e4704a00e4d8d505559c4348c366bd2301f9dfcaa2"
 }

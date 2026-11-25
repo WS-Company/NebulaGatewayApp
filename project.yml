@@ -9,9 +9,9 @@ options:
 settings:
   SWIFT_VERSION: "6.0"
   MACOSX_DEPLOYMENT_TARGET: "14.0"
-  DEVELOPMENT_TEAM: 6GMHLD8SMN
+  DEVELOPMENT_TEAM: 5X73B47284
   CODE_SIGN_STYLE: Manual
-  CODE_SIGN_IDENTITY: "Apple Development"
+  CODE_SIGN_IDENTITY: "Developer ID Application"
 
 targets:
   NebulaGateway:
@@ -72,3 +72,28 @@ targets:
       PRODUCT_NAME: com.nebulagateway.helper
       SKIP_INSTALL: true
       ENABLE_HARDENED_RUNTIME: true
+
+  # Logic tests without a host app: they compile the pure files directly.
+  NebulaGatewayTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: NebulaGatewayTests
+      - path: NebulaGatewayHelper/RunPath.swift
+      - path: NebulaGateway/Models/ConnectionConfig.swift
+      - path: NebulaGateway/Models/AppConfiguration.swift
+      - path: NebulaGateway/Services/TOMLCoding.swift
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.nebulagateway.tests
+      GENERATE_INFOPLIST_FILE: true
+      CODE_SIGN_IDENTITY: "-"
+      DEVELOPMENT_TEAM: ""
+
+schemes:
+  NebulaGatewayTests:
+    build:
+      targets:
+        NebulaGatewayTests: [test]
+    test:
+      targets:
+        - NebulaGatewayTests

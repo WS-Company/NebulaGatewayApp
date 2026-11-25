@@ -19,7 +19,7 @@ A lightweight macOS menu bar application for managing [Nebula](https://github.co
 
 ## Nebula
 
-The app ships the official [Nebula](https://github.com/slackhq/nebula) release (1.11.2, signed by Defined Networking)
+The app ships the official [Nebula](https://github.com/slackhq/nebula) release (1.12.0, signed by Defined Networking)
 in `Contents/Helpers`; no separate install is needed. The privileged helper copies `nebula` to
 `/Library/Application Support/NebulaGateway/bin/` and runs that copy only if its sha256 matches
 `NebulaGatewayHelper/BundledNebula.swift`.
@@ -41,6 +41,9 @@ open NebulaGateway.xcodeproj
 
 # Or build from command line
 xcodebuild -scheme NebulaGateway -configuration Release build
+
+# Unit tests (pure logic, no app launch)
+xcodebuild test -scheme NebulaGatewayTests -destination 'platform=macOS'
 ```
 
 The helper accepts connections only from `com.nebulagateway.app` signed by the Apple team named in `clientRequirement`
@@ -55,6 +58,18 @@ The helper accepts connections only from `com.nebulagateway.app` signed by the A
 5. Press "Move to local storage": the helper runs only configs from the app's storage, so Start stays disabled until
    then
 6. Click Start to connect
+
+A connection stays on until you press Stop: after the app or the Mac restarts, the app starts it again by itself.
+To have the app start with the Mac, switch on Settings › General › "Launch at login" (the Mac must log in by itself
+for a restart without hands: automatic login on, FileVault off).
+
+Updating from a build signed by another team (1.1.1 and older were): macOS keeps the helper's registration with the
+old team and cannot start the new helper, so the app shows "Helper not responding". Press Reinstall next to it. On
+one Mac (macOS 27.0) that was enough. On another (27.2) the first start after it was still refused and a second
+press left the registration waiting for approval: allow Nebula Gateway in System Settings › General › Login Items &
+Extensions ("Open Login Items…" in the same row), and the helper starts; then press Retry.
+A nebula started by the old build keeps running; one started from another binary (1.0.x used Homebrew's) is stopped
+with `sudo pkill -x nebula`, then Start. One started by 1.1.x is stopped and started with the app's own buttons.
 
 ## Configuration
 

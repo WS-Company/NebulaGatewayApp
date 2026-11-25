@@ -330,6 +330,66 @@
           }
         }
       }
+    },
+    "settings.tabs.general" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "General"
+          }
+        }
+      }
+    },
+    "settings.general.launchAtLogin" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Launch at login"
+          }
+        }
+      }
+    },
+    "settings.general.launchAtLogin.hint" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "After the Mac restarts, the app starts by itself. Connections that were on come back on every launch."
+          }
+        }
+      }
+    },
+    "settings.general.launchAtLogin.approve" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow in System Settings › Login Items…"
+          }
+        }
+      }
+    },
+    "popover.helper.reinstall" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reinstall"
+          }
+        }
+      }
+    },
+    "popover.helper.loginItems" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open Login Items…"
+          }
+        }
+      }
     }
   },
   "version" : "1.0"

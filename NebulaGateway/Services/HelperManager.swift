@@ -58,6 +58,39 @@ final class HelperManager {
         disconnectXPC()
     }
 
+    /// Registers the helper anew. Needed when macOS keeps a registration it can no longer start: the record
+    /// pins the signing team, so after an update from a build of another team launchd refuses the new helper
+    /// (`launchctl print` shows "spawn failed", EX_CONFIG) until the registration is made again.
+    func reinstallHelper() {
+        let service = SMAppService.daemon(plistName: "\(Constants.helperBundleId).plist")
+        status = .checking
+        disconnectXPC()
+        Task {
+            do {
+                try? await service.unregister()
+                // launchd needs a moment to drop the old job before it takes the new one.
+                try await Task.sleep(for: .seconds(2))
+                try service.register()
+                log.info("Privileged helper registered anew")
+                checkStatus()
+            } catch {
+                log.error("Failed to reinstall helper: \(error.localizedDescription)")
+                // macOS answers "Operation not permitted" while the new registration waits for the user.
+                let waitsForUser = service.status == .requiresApproval
+                    || (error as NSError).code == kSMErrorLaunchDeniedByUser
+                status = .error(waitsForUser ? Self.approvalHint : error.localizedDescription)
+            }
+        }
+    }
+
+    private static let approvalHint =
+        "Allow Nebula Gateway in System Settings → General → Login Items, then press Retry."
+
+    /// Opens the list where the user allows the helper to run in the background.
+    func openLoginItems() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+
     /// Check if the helper is installed and responding.
     func checkStatus() {
         status = .checking
@@ -75,6 +108,7 @@ final class HelperManager {
         }
 
         let service = SMAppService.daemon(plistName: plistName)
+        log.info("Helper registration status: \(service.status.rawValue)")
 
         switch service.status {
         case .enabled:
@@ -82,7 +116,10 @@ final class HelperManager {
                 DispatchQueue.main.async {
                     switch version {
                     case nil:
-                        self?.status = .error("Helper not responding")
+                        // An older helper also lands here: one built for another signing team refuses this app.
+                        self?.status = .error(
+                            "Helper not responding. After an update from an older build press Reinstall once; if macOS then wants approval, allow it in Login Items."
+                        )
                     case Constants.helperVersion:
                         self?.status = .ready
                     case let other?:
@@ -96,7 +133,7 @@ final class HelperManager {
         case .notRegistered, .notFound:
             status = .needsSetup
         case .requiresApproval:
-            status = .error("Helper requires approval in System Settings → Login Items")
+            status = .error(Self.approvalHint)
         @unknown default:
             status = .needsSetup
         }
@@ -169,8 +206,30 @@ final class HelperManager {
             reply(nil)
             return
         }
+        // A helper that launchd cannot start neither answers nor fails the call: without a deadline the
+        // status would stay "checking" forever. Whichever comes first, the answer or the deadline, wins.
+        let answered = PingAnswer()
         helper.ping { version in
-            reply(version.isEmpty ? nil : version)
+            if answered.first() { reply(version.isEmpty ? nil : version) }
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.pingTimeout) {
+            if answered.first() { reply(nil) }
+        }
+    }
+
+    private static let pingTimeout: TimeInterval = 5
+}
+
+/// Lets exactly one of two racing callers through.
+private final class PingAnswer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var taken = false
+
+    func first() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if taken { return false }
+        taken = true
+        return true
     }
 }

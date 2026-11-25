@@ -130,9 +130,37 @@ final class NebulaService {
     func restart(connection: ConnectionConfig, pid: Int32, onFailure: @escaping (String) -> Void) {
         log.info("Restarting '\(connection.name)' (PID \(pid))")
         stop(pid: pid, connectionName: connection.name)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            if let error = self?.start(connection: connection, onFailure: onFailure) {
-                onFailure(error)
+        startOnceStopped(connection: connection, pid: pid, attempt: 1, onFailure: onFailure)
+    }
+
+    /// Starts the connection once the old process is gone: the helper refuses a start while the connection
+    /// still runs one, and a nebula may take a few seconds to exit. After ten seconds it starts regardless,
+    /// and the helper's answer is shown.
+    private func startOnceStopped(
+        connection: ConnectionConfig, pid: Int32, attempt: Int, onFailure: @escaping (String) -> Void
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            let startNow = {
+                if let error = self.start(connection: connection, onFailure: onFailure) {
+                    onFailure(error)
+                }
+            }
+            guard attempt < 10, let helper = self.helperManager.getHelperProxy() else {
+                startNow()
+                return
+            }
+            helper.getRunningProcesses { processes in
+                let stopped = processes[String(pid)] == nil
+                DispatchQueue.main.async {
+                    if stopped {
+                        startNow()
+                    } else {
+                        self.startOnceStopped(
+                            connection: connection, pid: pid, attempt: attempt + 1, onFailure: onFailure
+                        )
+                    }
+                }
             }
         }
     }

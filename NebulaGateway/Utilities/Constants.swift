@@ -9,7 +9,7 @@ enum Constants {
     static let appBundleId = "com.nebulagateway.app"
     static let helperBundleId = "com.nebulagateway.helper"
     /// The helper version this app talks to; an older helper has a different XPC protocol.
-    static let helperVersion = "1.1.0"
+    static let helperVersion = "1.2.0"
     static let githubURL = URL(string: "https://github.com/WS-Company/NebulaGatewayApp")!
     static let nebulaGithubURL = URL(string: "https://github.com/slackhq/nebula")!
 

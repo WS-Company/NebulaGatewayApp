@@ -38,6 +38,8 @@ final class AppState {
     private var cachedInterfaces: [String: String] = [:]
     /// Counter for periodic heartbeat log (every 20 polls = ~60s)
     private var pollCount = 0
+    /// Set once the connections that were on have been brought back after launch.
+    private var restoredAfterLaunch = false
 
     // MARK: - Initialization
 
@@ -89,6 +91,7 @@ final class AppState {
             return
         }
         log.info("Starting connection '\(connection.name)'")
+        setWanted(id, true)
         connectionStates[id]?.status = .connecting
 
         let error = nebulaService.start(connection: connection) { [weak self] message in
@@ -105,6 +108,8 @@ final class AppState {
             log.error("stopConnection: connection '\(id)' not found")
             return
         }
+        // The user's Stop is the only thing that turns a connection off for the next launch.
+        setWanted(id, false)
         guard let state = connectionStates[id] else {
             log.error("stopConnection: no state for '\(connection.name)'")
             return
@@ -134,6 +139,7 @@ final class AppState {
         }
 
         log.info("Restarting connection '\(connection.name)' (PID \(pid))")
+        setWanted(id, true)
         connectionStates[id]?.status = .connecting
         nebulaService.restart(connection: connection, pid: pid) { [weak self] message in
             self?.connectionStates[id]?.status = .error(message)
@@ -153,6 +159,9 @@ final class AppState {
 
     func updateConnection(_ connection: ConnectionConfig) {
         guard let index = connections.firstIndex(where: { $0.id == connection.id }) else { return }
+        // The editor works on a copy; whether the connection is wanted on is not its to change.
+        var connection = connection
+        connection.connected = connections[index].connected
         connections[index] = connection
         // Invalidate caches for this connection
         cachedIPs.removeValue(forKey: connection.id)
@@ -186,6 +195,26 @@ final class AppState {
 
     // MARK: - Private
 
+    private func setWanted(_ id: String, _ wanted: Bool) {
+        guard let index = connections.firstIndex(where: { $0.id == id }),
+              connections[index].connected != wanted
+        else { return }
+        connections[index].connected = wanted
+        persistConfig()
+    }
+
+    /// Runs on the helper's first answer after launch: what is running counts as wanted on (nobody switched it
+    /// off), and what was on and is not running is started again.
+    private func restoreAfterLaunch(_ runningConfigPaths: Set<String>) {
+        for id in ConnectionConfig.idsRunning(connections, runningConfigPaths: runningConfigPaths) {
+            setWanted(id, true)
+        }
+        for id in ConnectionConfig.idsToRestore(connections, runningConfigPaths: runningConfigPaths) {
+            log.info("Restoring connection \(id): it was on when the app last ran")
+            startConnection(id)
+        }
+    }
+
     private func persistConfig() {
         var config = AppConfiguration()
         config.app.firstRun = false
@@ -196,6 +225,11 @@ final class AppState {
     /// Match running processes (by config path) to our connections and update states.
     private func updateFromPoll(_ runningByConfigPath: [String: ConnectionState]) {
         pollCount += 1
+
+        if !restoredAfterLaunch {
+            restoredAfterLaunch = true
+            restoreAfterLaunch(Set(runningByConfigPath.keys))
+        }
 
         // Heartbeat log every ~60 seconds (20 * 3s)
         if pollCount % 20 == 0 {

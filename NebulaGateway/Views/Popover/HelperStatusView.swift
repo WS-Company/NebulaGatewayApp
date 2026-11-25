@@ -77,6 +77,10 @@ struct HelperStatusView: View {
                     .font(.subheadline)
                     .fontWeight(.semibold)
                 Spacer()
+                Button(String(localized: "popover.helper.reinstall")) {
+                    appState.helperManager.reinstallHelper()
+                }
+                .controlSize(.small)
                 Button(String(localized: "popover.helper.retry")) {
                     appState.helperManager.checkStatus()
                 }
@@ -85,6 +89,12 @@ struct HelperStatusView: View {
             Text(message)
                 .font(.caption2)
                 .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(String(localized: "popover.helper.loginItems")) {
+                appState.helperManager.openLoginItems()
+            }
+            .buttonStyle(.link)
+            .font(.caption2)
         }
     }
 }

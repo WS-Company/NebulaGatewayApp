@@ -16,6 +16,14 @@ struct SettingsWindow: View {
                     )
                 }
 
+            GeneralTab()
+                .tabItem {
+                    Label(
+                        String(localized: "settings.tabs.general"),
+                        systemImage: "gearshape"
+                    )
+                }
+
             AboutTab()
                 .tabItem {
                     Label(

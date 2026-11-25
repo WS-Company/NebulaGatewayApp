@@ -8,11 +8,11 @@ import Foundation
 /// Starts and stops Nebula with root privileges on behalf of the main app, and only for it.
 final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchecked Sendable {
 
-    private let version = "1.1.0"
+    private let version = "1.2.0"
 
     /// Only our signed app may connect: its bundle id and our team.
     private static let clientRequirement =
-        "anchor apple generic and identifier \"com.nebulagateway.app\" and certificate leaf[subject.OU] = \"ZUQ8Q4D64R\""
+        "anchor apple generic and identifier \"com.nebulagateway.app\" and certificate leaf[subject.OU] = \"5X73B47284\""
 
     /// Root-owned copy of the bundled nebula; the only binary the helper runs.
     private static let supportDir = "/Library/Application Support/NebulaGateway"
@@ -20,10 +20,15 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
     private static let binaryPath = binDir + "/nebula"
     private static let logDir = "/Library/Logs/NebulaGateway"
 
-    /// Maps PID → (Process, configPath) for tracking Nebula processes we started.
-    private var trackedProcesses: [Int32: (process: Process, configPath: String)] = [:]
+    private static let maxConfigSize = 1 << 20
+    private static let maxBinarySize = 256 << 20
+
+    /// Maps PID → (Process, the run copy of its config) for tracking Nebula processes we started.
+    private var trackedProcesses: [Int32: (process: Process, runConfig: String)] = [:]
     private let processLock = NSLock()
     private let installLock = NSLock()
+    /// Serializes starts, so two callers can't both find a connection free and start it twice.
+    private let startLock = NSLock()
 
     // MARK: - NSXPCListenerDelegate
 
@@ -43,15 +48,29 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
         configPath: String,
         reply: @escaping (Bool, String) -> Void
     ) {
-        guard Self.isValidConnectionId(connectionId) else {
+        guard RunPath.isValidConnectionId(connectionId) else {
             reply(false, "Invalid connection id: \(connectionId)")
             return
         }
 
+        // Only `<the caller's local storage>/<connectionId>/config.yml`, by its canonical path.
         guard let uid = NSXPCConnection.current()?.effectiveUserIdentifier,
-              Self.isAllowedConfig(configPath, uid: uid)
+              let storage = Self.storageDirectory(of: uid),
+              configPath == RunPath.userConfig(storage: storage, connectionId: connectionId)
         else {
             reply(false, "The config must be in the app's local storage. Use \"Move to local storage\" first.")
+            return
+        }
+
+        startLock.lock()
+        defer { startLock.unlock() }
+
+        guard !RunPath.isRunning(
+            runConfig: RunPath.config(uid: uid, connectionId: connectionId),
+            userConfig: configPath,
+            among: runningConfigPaths()
+        ) else {
+            reply(false, "This connection is already running")
             return
         }
 
@@ -62,14 +81,39 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
             return
         }
 
+        // Nebula gets a root-owned copy: the user's file can't be swapped under it after the check.
+        let runConfig: String
+        do {
+            runConfig = try Self.copyConfig(from: configPath, uid: uid, connectionId: connectionId)
+        } catch {
+            reply(false, "Config: \(error.localizedDescription)")
+            return
+        }
+
         let logPath = Self.logDir + "/\(connectionId).log"
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.binaryPath)
-        process.arguments = ["-config", configPath]
+        process.arguments = ["-config", runConfig]
 
         if let logFileHandle = Self.openLog(at: logPath) {
             process.standardOutput = logFileHandle
             process.standardError = logFileHandle
+        }
+
+        // Monitor for unexpected termination — clean up dictionary. Set before the start: a nebula that
+        // exits at once must still leave its line in the log.
+        process.terminationHandler = { [weak self] proc in
+            let exitPid = proc.processIdentifier
+            let exitCode = proc.terminationStatus
+            // Write termination info to the nebula log
+            if let handle = Self.openLog(at: logPath) {
+                let msg = "\n[NebulaGatewayHelper] Process PID \(exitPid) terminated with exit code \(exitCode)\n"
+                try? handle.write(contentsOf: Data(msg.utf8))
+                try? handle.close()
+            }
+            self?.processLock.lock()
+            self?.trackedProcesses.removeValue(forKey: exitPid)
+            self?.processLock.unlock()
         }
 
         do {
@@ -81,24 +125,10 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
 
         let pid = process.processIdentifier
 
+        // An entry of a process that has already exited is swept by the next getRunningProcesses.
         processLock.lock()
-        trackedProcesses[pid] = (process, configPath)
+        trackedProcesses[pid] = (process, runConfig)
         processLock.unlock()
-
-        // Monitor for unexpected termination — clean up dictionary
-        process.terminationHandler = { [weak self] proc in
-            let exitPid = proc.processIdentifier
-            let exitCode = proc.terminationStatus
-            // Write termination info to the nebula log
-            if let handle = Self.openLog(at: logPath) {
-                let msg = "\n[NebulaGatewayHelper] Process PID \(exitPid) terminated with exit code \(exitCode)\n"
-                handle.write(msg.data(using: .utf8) ?? Data())
-                try? handle.close()
-            }
-            self?.processLock.lock()
-            self?.trackedProcesses.removeValue(forKey: exitPid)
-            self?.processLock.unlock()
-        }
 
         reply(true, String(pid))
     }
@@ -109,9 +139,20 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
             return
         }
 
+        guard let uid = NSXPCConnection.current()?.effectiveUserIdentifier else {
+            reply(false, "Unknown caller")
+            return
+        }
+
         processLock.lock()
         let tracked = trackedProcesses[pid]
         processLock.unlock()
+
+        // The run copy's path names the user who started the process.
+        guard RunPath.mayStop(configPath: tracked?.runConfig ?? Self.configPath(of: pid), callerUid: uid) else {
+            reply(false, "PID \(pid) was started by another user")
+            return
+        }
 
         if let entry = tracked {
             entry.process.terminate()
@@ -146,13 +187,32 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
     }
 
     func getRunningProcesses(reply: @escaping ([String: String]) -> Void) {
+        guard let uid = NSXPCConnection.current()?.effectiveUserIdentifier else {
+            reply([:])
+            return
+        }
+        let storage = Self.storageDirectory(of: uid)
+
+        let started = runningProcesses()
+
+        // The caller sees its own connections under the path of its own config, and no other user's.
+        var result: [String: String] = [:]
+        for (pid, path) in started {
+            result[pid] = RunPath.reported(configPath: path, callerUid: uid, callerStorage: storage)
+        }
+
+        reply(result)
+    }
+
+    /// Every running nebula the helper knows of, PID → the config it was started with (a run copy for our own).
+    private func runningProcesses() -> [String: String] {
         // 1. Our tracked processes
         processLock.lock()
-        var result: [String: String] = [:]
+        var started: [String: String] = [:]
         var deadPids: [Int32] = []
         for (pid, entry) in trackedProcesses {
             if entry.process.isRunning {
-                result[String(pid)] = entry.configPath
+                started[String(pid)] = entry.runConfig
             } else {
                 deadPids.append(pid)
             }
@@ -163,13 +223,14 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
         processLock.unlock()
 
         // 2. Scan system via /proc info (non-blocking, no subprocess)
-        for entry in findNebulaProcesses() {
-            if result[entry.pid] == nil {
-                result[entry.pid] = entry.configPath
-            }
+        for entry in findNebulaProcesses() where started[entry.pid] == nil {
+            started[entry.pid] = entry.configPath
         }
+        return started
+    }
 
-        reply(result)
+    private func runningConfigPaths() -> [String] {
+        Array(runningProcesses().values)
     }
 
     /// Find nebula processes by reading /proc info via sysctl.
@@ -208,28 +269,11 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
                 }
             }
 
-            guard name == "nebula" else { continue }
+            // Nebula needs root for its tun device. A user's own process that merely carries the name and a
+            // `-config` argument must not show up as anybody's connection.
+            guard name == "nebula", proc.kp_eproc.e_ucred.cr_uid == 0 else { continue }
 
-            // Get full command line args via KERN_PROCARGS2
-            var argsMib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
-            var argsSize: Int = 0
-            guard sysctl(&argsMib, 3, nil, &argsSize, nil, 0) == 0, argsSize > 0 else {
-                continue
-            }
-
-            var argsBuffer = [UInt8](repeating: 0, count: argsSize)
-            guard sysctl(&argsMib, 3, &argsBuffer, &argsSize, nil, 0) == 0 else {
-                continue
-            }
-
-            // Parse: first 4 bytes = argc, then exec path, then null-separated args
-            let args = String(bytes: argsBuffer.dropFirst(4), encoding: .utf8) ?? ""
-            let parts = args.split(separator: "\0").map(String.init)
-
-            // Find "-config" argument
-            if let configIdx = parts.firstIndex(of: "-config"),
-               configIdx + 1 < parts.count {
-                let configPath = parts[configIdx + 1]
+            if let configPath = Self.configPath(of: pid) {
                 results.append((pid: String(pid), configPath: configPath))
             }
         }
@@ -243,22 +287,102 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
 
     // MARK: - Private
 
-    /// Connection ids look like `connection_1`; they become the log file name.
-    private static func isValidConnectionId(_ id: String) -> Bool {
-        id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil
+    /// The `-config` argument of a process, read via KERN_PROCARGS2 (no subprocess).
+    private static func configPath(of pid: Int32) -> String? {
+        var argsMib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var argsSize: Int = 0
+        guard sysctl(&argsMib, 3, nil, &argsSize, nil, 0) == 0, argsSize > 0 else { return nil }
+
+        var argsBuffer = [UInt8](repeating: 0, count: argsSize)
+        guard sysctl(&argsMib, 3, &argsBuffer, &argsSize, nil, 0) == 0 else { return nil }
+
+        // Parse: first 4 bytes = argc, then exec path, then null-separated args
+        let args = String(bytes: argsBuffer.dropFirst(4), encoding: .utf8) ?? ""
+        let parts = args.split(separator: "\0").map(String.init)
+
+        guard let configIdx = parts.firstIndex(of: "-config"), configIdx + 1 < parts.count else { return nil }
+        return parts[configIdx + 1]
     }
 
-    /// The config must be a regular file of the calling user, inside that user's local storage,
-    /// given by its canonical path (no symlinks, no `..`).
-    private static func isAllowedConfig(_ path: String, uid: uid_t) -> Bool {
-        guard let home = homeDirectory(of: uid),
-              let storage = realPath(home + "/Library/Application Support/Nebula Gateway/connections"),
-              realPath(path) == path,
-              path.hasPrefix(storage + "/")
-        else { return false }
+    /// The canonical path of a user's local storage (`…/Nebula Gateway/connections`), if it exists.
+    private static func storageDirectory(of uid: uid_t) -> String? {
+        guard let home = homeDirectory(of: uid) else { return nil }
+        return realPath(home + "/Library/Application Support/Nebula Gateway/connections")
+    }
+
+    /// Copies the user's config into the root-only run directory and returns the copy's path.
+    private static func copyConfig(from path: String, uid: uid_t, connectionId: String) throws -> String {
+        let data = try readRegularFile(path, maxSize: maxConfigSize, owner: uid)
+
+        try ensureRootDirectory(supportDir)
+        try ensureRootDirectory(RunPath.root, mode: 0o700)
+        try ensureRootDirectory(RunPath.userDirectory(uid: uid), mode: 0o700)
+        try ensureRootDirectory(RunPath.directory(uid: uid, connectionId: connectionId), mode: 0o700)
+
+        let runConfig = RunPath.config(uid: uid, connectionId: connectionId)
+        try writeRootFile(data, to: runConfig, mode: 0o600)
+        return runConfig
+    }
+
+    /// Reads a file without following a symlink at its last component. It must be a regular file,
+    /// of the given owner if one is named, and no larger than `maxSize`.
+    private static func readRegularFile(_ path: String, maxSize: Int, owner: uid_t? = nil) throws -> Data {
+        // O_NONBLOCK: a FIFO in place of the file must not hang the helper before fstat refuses it.
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else {
+            throw HelperError("cannot open \(path): \(String(cString: strerror(errno)))")
+        }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
 
         var info = stat()
-        return lstat(path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFREG && info.st_uid == uid
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+            throw HelperError("\(path) is not a regular file")
+        }
+        if let owner, info.st_uid != owner {
+            throw HelperError("\(path) is not owned by the user")
+        }
+        guard info.st_size <= maxSize else {
+            throw HelperError("\(path) is too large")
+        }
+
+        var data = Data()
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            data.append(chunk)
+            guard data.count <= maxSize else {
+                throw HelperError("\(path) is too large")
+            }
+        }
+        return data
+    }
+
+    /// Writes a root-owned file through a new temp file in the same directory, then renames it into place,
+    /// so a symlink planted at either name is never followed and a running nebula keeps its old file.
+    private static func writeRootFile(_ data: Data, to path: String, mode: mode_t) throws {
+        let temp = (path as NSString).deletingLastPathComponent + "/.tmp-\(UUID().uuidString)"
+        let fd = open(temp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode)
+        guard fd >= 0 else {
+            throw HelperError("cannot create \(temp): \(String(cString: strerror(errno)))")
+        }
+
+        do {
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            try handle.write(contentsOf: data)
+            guard fchown(fd, 0, 0) == 0, fchmod(fd, mode) == 0 else {
+                throw HelperError("cannot set owner of \(temp): \(String(cString: strerror(errno)))")
+            }
+            try handle.close()
+            guard rename(temp, path) == 0 else {
+                throw HelperError("cannot replace \(path): \(String(cString: strerror(errno)))")
+            }
+        } catch {
+            unlink(temp)
+            throw error
+        }
+    }
+
+    private static func isRootRegularFile(_ path: String) -> Bool {
+        var info = stat()
+        return lstat(path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFREG && info.st_uid == 0
     }
 
     private static func homeDirectory(of uid: uid_t) -> String? {
@@ -305,7 +429,8 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
         try Self.ensureRootDirectory(Self.supportDir)
         try Self.ensureRootDirectory(Self.binDir)
 
-        if Self.sha256(ofFile: Self.binaryPath) == BundledNebula.sha256 {
+        if Self.isRootRegularFile(Self.binaryPath),
+           Self.sha256(ofFile: Self.binaryPath) == BundledNebula.sha256 {
             return
         }
 
@@ -313,33 +438,24 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
             throw HelperError("cannot locate the app bundle")
         }
 
-        let temp = Self.binDir + "/.nebula-\(UUID().uuidString)"
-        let fm = FileManager.default
-        try fm.copyItem(atPath: source, toPath: temp)
-        removexattr(temp, "com.apple.quarantine", XATTR_NOFOLLOW)
-
-        guard Self.sha256(ofFile: temp) == BundledNebula.sha256 else {
-            try? fm.removeItem(atPath: temp)
+        // The bytes that were hashed are the bytes that get installed: the source is read once, by descriptor.
+        let data = try Self.readRegularFile(source, maxSize: Self.maxBinarySize)
+        guard Self.sha256(of: data) == BundledNebula.sha256 else {
             throw HelperError("the bundled nebula does not match the expected sha256")
         }
-
-        guard chown(temp, 0, 0) == 0, chmod(temp, 0o755) == 0, rename(temp, Self.binaryPath) == 0 else {
-            let err = String(cString: strerror(errno))
-            try? fm.removeItem(atPath: temp)
-            throw HelperError("cannot install nebula: \(err)")
-        }
+        try Self.writeRootFile(data, to: Self.binaryPath, mode: 0o755)
     }
 
-    /// Creates the directory if needed and makes sure it is a real directory owned by root, mode 0755.
-    private static func ensureRootDirectory(_ path: String) throws {
-        if mkdir(path, 0o755) != 0 && errno != EEXIST {
+    /// Creates the directory if needed and makes sure it is a real directory owned by root with that mode.
+    private static func ensureRootDirectory(_ path: String, mode: mode_t = 0o755) throws {
+        if mkdir(path, mode) != 0 && errno != EEXIST {
             throw HelperError("cannot create \(path): \(String(cString: strerror(errno)))")
         }
         var info = stat()
         guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR else {
             throw HelperError("\(path) is not a directory")
         }
-        guard chown(path, 0, 0) == 0, chmod(path, 0o755) == 0 else {
+        guard chown(path, 0, 0) == 0, chmod(path, mode) == 0 else {
             throw HelperError("cannot set owner of \(path): \(String(cString: strerror(errno)))")
         }
     }
@@ -360,6 +476,10 @@ final class HelperTool: NSObject, HelperProtocol, NSXPCListenerDelegate, @unchec
             hasher.update(data: chunk)
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func sha256(of data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
 

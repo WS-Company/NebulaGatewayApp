@@ -124,42 +124,50 @@ final class ConfigStorageService {
     }
 
     /// Re-imports config and its PKI files when user chooses a new config.yml for a local-storage connection.
+    /// The chosen file is parsed where it lies, so its relative PKI paths resolve beside it, and nothing in
+    /// the storage is touched until every source file is known to be there.
     func reimportConfig(for connection: inout ConnectionConfig, newConfigPath: URL) throws {
         let connectionDir = Constants.Paths.connections.appendingPathComponent(connection.id)
         let dstConfig = connectionDir.appendingPathComponent(Constants.NebulaFiles.config)
 
-        // Copy new config
-        try copyFileOverwriting(from: newConfigPath, to: dstConfig)
+        let parsed = try parser.parse(at: newConfigPath.path)
 
-        // Parse and copy PKI files
-        let parsed = try parser.parse(at: dstConfig.path)
-
-        if let ca = parsed.caPath {
-            try copyFileOverwriting(
-                from: URL(fileURLWithPath: ca),
-                to: connectionDir.appendingPathComponent(Constants.NebulaFiles.caCert)
-            )
-        }
-        if let cert = parsed.certPath {
-            try copyFileOverwriting(
-                from: URL(fileURLWithPath: cert),
-                to: connectionDir.appendingPathComponent(Constants.NebulaFiles.nodeCert)
-            )
-        }
-        if let key = parsed.keyPath {
-            try copyFileOverwriting(
-                from: URL(fileURLWithPath: key),
-                to: connectionDir.appendingPathComponent(Constants.NebulaFiles.nodeKey)
-            )
+        let pkiMappings: [(source: String?, destination: String)] = [
+            (parsed.caPath, Constants.NebulaFiles.caCert),
+            (parsed.certPath, Constants.NebulaFiles.nodeCert),
+            (parsed.keyPath, Constants.NebulaFiles.nodeKey),
+        ]
+        var copies: [(from: URL, name: String)] = [(newConfigPath, Constants.NebulaFiles.config)]
+        for mapping in pkiMappings {
+            guard let srcPath = mapping.source else {
+                throw NebulaConfigParser.ParseError.malformedYAML("Missing PKI path for \(mapping.destination)")
+            }
+            copies.append((URL(fileURLWithPath: srcPath), mapping.destination))
         }
 
-        // Rewrite paths
+        // Everything is prepared in a staging folder first; the stored files are replaced only once the new
+        // set is complete. A source may be a stored file itself (under any spelling of its path): it is
+        // copied before anything is replaced.
+        let staging = connectionDir.appendingPathComponent(".reimport-\(UUID().uuidString)")
+        try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: staging) }
+
+        for copy in copies {
+            try fileManager.copyItem(at: copy.from, to: staging.appendingPathComponent(copy.name))
+        }
         try parser.rewritePKIPaths(
-            configPath: dstConfig.path,
+            configPath: staging.appendingPathComponent(Constants.NebulaFiles.config).path,
             caPath: connectionDir.appendingPathComponent(Constants.NebulaFiles.caCert).path,
             certPath: connectionDir.appendingPathComponent(Constants.NebulaFiles.nodeCert).path,
             keyPath: connectionDir.appendingPathComponent(Constants.NebulaFiles.nodeKey).path
         )
+
+        for copy in copies {
+            _ = try fileManager.replaceItemAt(
+                connectionDir.appendingPathComponent(copy.name),
+                withItemAt: staging.appendingPathComponent(copy.name)
+            )
+        }
 
         connection.configPath = dstConfig.path
         log.info("Re-imported config for '\(connection.name)'")
@@ -187,96 +195,5 @@ final class ConfigStorageService {
             try fileManager.removeItem(at: dst)
         }
         try fileManager.copyItem(at: src, to: dst)
-    }
-}
-
-// MARK: - Minimal TOML Encoder/Decoder
-
-// Lightweight TOML handling for the simple config.toml structure.
-// For production, consider replacing with TOMLKit SPM package.
-
-enum TOMLDecoder {
-
-    static func decode(_ type: AppConfiguration.Type, from content: String) throws -> AppConfiguration {
-        var config = AppConfiguration()
-        var currentConnection: ConnectionConfig?
-        var connections: [ConnectionConfig] = []
-
-        for line in content.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
-
-            if trimmed == "[[connections]]" {
-                if let conn = currentConnection {
-                    connections.append(conn)
-                }
-                currentConnection = ConnectionConfig(
-                    id: "", name: "", configPath: "", localStorage: false, autostart: false
-                )
-                continue
-            }
-
-            guard let (key, value) = parseKeyValue(trimmed) else { continue }
-
-            if currentConnection != nil {
-                switch key {
-                case "id":           currentConnection?.id = value
-                case "name":         currentConnection?.name = value
-                case "config_path":  currentConnection?.configPath = value
-                case "local_storage": currentConnection?.localStorage = (value == "true")
-                case "autostart":    currentConnection?.autostart = (value == "true")
-                default: break
-                }
-            } else {
-                switch key {
-                case "version":   config.app.version = value
-                case "first_run": config.app.firstRun = (value == "true")
-                default: break
-                }
-            }
-        }
-
-        if let conn = currentConnection {
-            connections.append(conn)
-        }
-        config.connections = connections
-        return config
-    }
-
-    private static func parseKeyValue(_ line: String) -> (String, String)? {
-        guard let eqIndex = line.firstIndex(of: "=") else { return nil }
-        let key = line[..<eqIndex].trimmingCharacters(in: .whitespaces)
-        var value = line[line.index(after: eqIndex)...].trimmingCharacters(in: .whitespaces)
-        // Strip quotes
-        if value.hasPrefix("\"") && value.hasSuffix("\"") {
-            value = String(value.dropFirst().dropLast())
-        }
-        return (key, value)
-    }
-}
-
-enum TOMLEncoder {
-
-    static func encode(_ config: AppConfiguration) -> String {
-        var lines: [String] = [
-            "# Nebula Gateway Configuration",
-            "",
-            "[app]",
-            "version = \"\(config.app.version)\"",
-            "first_run = \(config.app.firstRun)",
-        ]
-
-        for conn in config.connections {
-            lines.append("")
-            lines.append("[[connections]]")
-            lines.append("id = \"\(conn.id)\"")
-            lines.append("name = \"\(conn.name)\"")
-            lines.append("config_path = \"\(conn.configPath)\"")
-            lines.append("local_storage = \(conn.localStorage)")
-            lines.append("autostart = \(conn.autostart)")
-        }
-
-        lines.append("")
-        return lines.joined(separator: "\n")
     }
 }

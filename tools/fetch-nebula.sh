@@ -5,10 +5,10 @@
 # To change the version, update all four values below and BundledNebula.swift.
 set -euo pipefail
 
-VERSION="v1.11.2"
-ZIP_SHA256="ae23ebd29e570d72f28d71e608261d454fb87b1a19b4ca21c2aa26bb4698da88"
-NEBULA_SHA256="b2eec15124d83774e5831baeabfca6283f90c950143e21334ed2522c793e9038"
-NEBULA_CERT_SHA256="af3d5cb8bbd07ba33994172a679b278dda9a5ffc04f3173c7f581e6aea14c6a1"
+VERSION="v1.12.0"
+ZIP_SHA256="fa9c408ec42bfd7391055ab81fb8571d4f27a046aa82481e8dab6230205a049a"
+NEBULA_SHA256="e4bd2008c52c7fe7696700e4704a00e4d8d505559c4348c366bd2301f9dfcaa2"
+NEBULA_CERT_SHA256="f4687e46fa5215a69be40089a26e9f2c33ddcee544e580a49d7585143a1d5b72"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$ROOT/Vendor/nebula"

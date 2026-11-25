@@ -19,8 +19,9 @@ struct ConnectionConfig: Identifiable, Codable, Equatable {
     /// Whether the config and certs have been copied into local app storage.
     var localStorage: Bool
 
-    /// Whether to start this connection automatically on app launch.
-    var autostart: Bool
+    /// Whether the user wants this connection on. Start sets it, only Stop or Delete clears it: quitting the
+    /// app, a reboot or nebula dying leave it, so the next launch brings the connection back.
+    var connected: Bool
 
     // MARK: - Derived paths (read from Nebula YAML at runtime, not persisted)
 
@@ -48,7 +49,21 @@ struct ConnectionConfig: Identifiable, Codable, Equatable {
             name: name,
             configPath: configPath,
             localStorage: false,
-            autostart: false
+            connected: false
         )
+    }
+
+    /// The connections found running on launch; nobody switched them off, so they count as wanted on.
+    static func idsRunning(_ connections: [ConnectionConfig], runningConfigPaths: Set<String>) -> [String] {
+        connections.filter { runningConfigPaths.contains($0.configURL.path) }.map(\.id)
+    }
+
+    /// The connections to start on launch: wanted on, startable (in local storage) and not running already.
+    /// `runningConfigPaths` is the helper's first answer; without it a config still running after a mere
+    /// app quit would get a second nebula.
+    static func idsToRestore(_ connections: [ConnectionConfig], runningConfigPaths: Set<String>) -> [String] {
+        connections
+            .filter { $0.connected && $0.localStorage && !runningConfigPaths.contains($0.configURL.path) }
+            .map(\.id)
     }
 }
